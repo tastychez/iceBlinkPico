@@ -1,0 +1,32 @@
+module register_file (
+    input logic clk,
+    input logic reset,
+    input logic [4:0] rs1_addr,
+    input logic [4:0] rs2_addr,
+    input logic [4:0] rd_addr,
+    input logic [31:0] w_data,
+    input logic w_en,
+    output logic [31:0] rs1_data,
+    output logic [31:0] rs2_data
+);
+
+    logic [31:0] regs [0:31];
+
+    // Asynchronous Read
+    assign rs1_data = (rs1_addr == 0) ? 32'd0 : regs[rs1_addr];
+    assign rs2_data = (rs2_addr == 0) ? 32'd0 : regs[rs2_addr];
+
+    // Synchronous Write
+    always_ff @(posedge clk) begin
+        if (reset) begin
+            // Optional: clear registers on reset, but not strictly required by RV32I (except x0)
+            // For simulation it's nice.
+            // But usually we just rely on x0 being 0.
+            // regs <= '{default:0}; 
+        end else if (w_en && (rd_addr != 0)) begin
+            regs[rd_addr] <= w_data;
+        end
+    end
+
+endmodule
+

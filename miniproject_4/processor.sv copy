@@ -1,0 +1,262 @@
+`include "alu.sv"
+`include "register_file.sv"
+
+module processor(
+    input logic clk,
+    input logic reset,
+    
+    output logic [31:0] imem_address,
+    input logic [31:0] imem_data_in,
+    
+    output logic [31:0] dmem_address,
+    output logic [31:0] dmem_data_in,
+    input logic [31:0] dmem_data_out,
+    output logic dmem_wren,
+    output logic [2:0] funct3_out
+);
+
+    // State Machine
+    typedef enum logic [2:0] {
+        FETCH,
+        DECODE,
+        EXECUTE,
+        MEM,
+        WB
+    } state_t;
+
+    state_t state = FETCH;
+    logic [31:0] pc = 32'h1000;
+    logic [31:0] inst;
+    
+    // Instruction Fields
+    wire [6:0] opcode = inst[6:0];
+    wire [4:0] rd_addr = inst[11:7];
+    wire [2:0] funct3 = inst[14:12];
+    wire [4:0] rs1_addr = inst[19:15];
+    wire [4:0] rs2_addr = inst[24:20];
+    wire [6:0] funct7 = inst[31:25];
+
+    // Immediates
+    wire [31:0] imm_i = { {20{inst[31]}}, inst[31:20] };
+    wire [31:0] imm_s = { {20{inst[31]}}, inst[31:25], inst[11:7] };
+    wire [31:0] imm_b = { {20{inst[31]}}, inst[7], inst[30:25], inst[11:8], 1'b0 };
+    wire [31:0] imm_u = { inst[31:12], 12'b0 };
+    wire [31:0] imm_j = { {12{inst[31]}}, inst[19:12], inst[20], inst[30:21], 1'b0 };
+
+    // Register File
+    logic [31:0] rs1_data, rs2_data;
+    logic [31:0] rd_data;
+    logic rf_w_en;
+
+    register_file reg_file (
+        .clk(clk),
+        .reset(reset),
+        .rs1_addr(rs1_addr),
+        .rs2_addr(rs2_addr),
+        .rd_addr(rd_addr),
+        .w_data(rd_data),
+        .w_en(rf_w_en),
+        .rs1_data(rs1_data),
+        .rs2_data(rs2_data)
+    );
+
+    // ALU
+    logic [31:0] alu_a, alu_b;
+    logic [3:0] alu_control;
+    logic [31:0] alu_result;
+    logic alu_zero, alu_lt, alu_ltu;
+
+    alu u_alu (
+        .a(alu_a),
+        .b(alu_b),
+        .alu_op(alu_control),
+        .result(alu_result),
+        .zero(alu_zero),
+        .lt(alu_lt),
+        .ltu(alu_ltu)
+    );
+
+    // Memory Outputs
+    assign imem_address = pc;
+    assign dmem_address = alu_result;
+    assign dmem_data_in = rs2_data;
+    assign funct3_out = funct3;
+    assign dmem_wren = (state == MEM && opcode == 7'b0100011); // Store only in MEM state
+
+    // Write Back Enable
+    assign rf_w_en = (state == WB);
+
+    // Logic for Branch Taken
+    logic branch_taken;
+    always_comb begin
+        case (funct3)
+            3'b000: branch_taken = alu_zero;
+            3'b001: branch_taken = !alu_zero;
+            3'b100: branch_taken = alu_lt;
+            3'b101: branch_taken = !alu_lt;
+            3'b110: branch_taken = alu_ltu;
+            3'b111: branch_taken = !alu_ltu;
+            default: branch_taken = 1'b0;
+        endcase
+    end
+
+    // ALU Control Logic
+    always_comb begin
+        alu_control = 4'b0000;
+        if (state == EXECUTE || state == MEM || state == WB) begin
+            case (opcode)
+                7'b0110011: begin // R-type
+                    case (funct3)
+                        3'b000: alu_control = (funct7[5]) ? 4'b1000 : 4'b0000; // SUB/ADD
+                        3'b001: alu_control = 4'b0001; // SLL
+                        3'b010: alu_control = 4'b0010; // SLT
+                        3'b011: alu_control = 4'b0011; // SLTU
+                        3'b100: alu_control = 4'b0100; // XOR
+                        3'b101: alu_control = (funct7[5]) ? 4'b1101 : 4'b0101; // SRA/SRL
+                        3'b110: alu_control = 4'b0110; // OR
+                        3'b111: alu_control = 4'b0111; // AND
+                    endcase
+                end
+                7'b0010011: begin // I-type
+                    case (funct3)
+                        3'b000: alu_control = 4'b0000; // ADDI
+                        3'b001: alu_control = 4'b0001; // SLLI
+                        3'b010: alu_control = 4'b0010; // SLTI
+                        3'b011: alu_control = 4'b0011; // SLTIU
+                        3'b100: alu_control = 4'b0100; // XORI
+                        3'b101: alu_control = (inst[30]) ? 4'b1101 : 4'b0101; // SRAI/SRLI
+                        3'b110: alu_control = 4'b0110; // ORI
+                        3'b111: alu_control = 4'b0111; // ANDI
+                    endcase
+                end
+                7'b1100011: alu_control = 4'b0000; // Branch (use flags, operation technically SUB for flags but internal logic does it? No, my ALU provides flags based on inputs. Wait. My ALU flags depend on inputs, not result of op? Let's check ALU.)
+                // ALU check: assign zero = (result == 0); assign lt = ($signed(a) < $signed(b));
+                // For Branch, we need to compare A and B. 
+                // LT/LTU use inputs directly.
+                // Zero uses Result. For BEQ (A==B), A-B == 0. So we need SUB.
+                // So for Branch, use SUB.
+                default: alu_control = 4'b0000; // Default ADD
+            endcase
+            if (opcode == 7'b1100011) alu_control = 4'b1000; // Force SUB for Branch to get Zero flag correct
+        end
+    end
+
+    // ALU Operand Selection
+    always_comb begin
+        alu_a = rs1_data;
+        alu_b = rs2_data;
+
+        if (state == EXECUTE || state == MEM || state == WB) begin
+            case (opcode)
+                7'b0110011: begin // R-type
+                    alu_a = rs1_data;
+                    alu_b = rs2_data;
+                end
+                7'b0010011: begin // I-type
+                    alu_a = rs1_data;
+                    alu_b = imm_i;
+                end
+                7'b0000011: begin // Load
+                    alu_a = rs1_data;
+                    alu_b = imm_i;
+                end
+                7'b0100011: begin // Store
+                    alu_a = rs1_data;
+                    alu_b = imm_s;
+                end
+                7'b1100011: begin // Branch
+                    alu_a = rs1_data;
+                    alu_b = rs2_data;
+                end
+                7'b0010111: begin // AUIPC
+                    alu_a = pc;
+                    alu_b = imm_u;
+                end
+                7'b0110111: begin // LUI
+                    alu_a = 32'd0;
+                    alu_b = imm_u;
+                end
+                7'b1101111: begin // JAL
+                   // Not using ALU for JAL address calc in this path usually, but can.
+                   // PC + ImmJ.
+                   // Here we might use ALU to compute address?
+                   // No, JAL saves PC+4 to RD.
+                   // Target address is PC + ImmJ.
+                end
+                7'b1100111: begin // JALR
+                   // Target = (RS1 + ImmI) & ~1
+                   alu_a = rs1_data;
+                   alu_b = imm_i;
+                end
+            endcase
+        end
+    end
+
+    // WB Data Selection
+    always_comb begin
+        rd_data = alu_result;
+        if (opcode == 7'b0000011) begin // Load
+            rd_data = dmem_data_out;
+        end else if (opcode == 7'b1101111 || opcode == 7'b1100111) begin // JAL / JALR
+            rd_data = pc + 4;
+        end
+    end
+
+    // FSM Update
+    always_ff @(posedge clk) begin
+        if (reset) begin
+            state <= FETCH;
+            pc <= 32'h1000;
+        end else begin
+            case (state)
+                FETCH: begin
+                    state <= DECODE;
+                end
+                
+                DECODE: begin
+                    inst <= imem_data_in;
+                    state <= EXECUTE;
+                end
+                
+                EXECUTE: begin
+                    case (opcode)
+                        7'b0000011: state <= MEM; // Load
+                        7'b0100011: state <= MEM; // Store
+                        7'b1100011: begin // Branch
+                            if (branch_taken) pc <= pc + imm_b;
+                            else pc <= pc + 4;
+                            state <= FETCH;
+                        end
+                        7'b1101111: begin // JAL
+                            pc <= pc + imm_j;
+                            state <= WB;
+                        end
+                        7'b1100111: begin // JALR
+                            pc <= alu_result & 32'hFFFFFFFE;
+                            state <= WB;
+                        end
+                        default: state <= WB; // R-type, I-type, LUI, AUIPC
+                    endcase
+                end
+                
+                MEM: begin
+                    if (opcode == 7'b0000011) begin // Load
+                        state <= WB;
+                    end else begin // Store
+                        pc <= pc + 4;
+                        state <= FETCH;
+                    end
+                end
+                
+                WB: begin
+                    if (opcode != 7'b1101111 && opcode != 7'b1100111) begin
+                         pc <= pc + 4;
+                    end
+                    // For JAL/JALR, PC was already updated in EXECUTE.
+                    state <= FETCH;
+                end
+            endcase
+        end
+    end
+
+endmodule

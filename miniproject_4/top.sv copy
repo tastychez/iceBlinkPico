@@ -1,0 +1,75 @@
+`include "memory.sv"
+`include "processor.sv"
+
+module top (
+    input logic clk, 
+    output logic LED, 
+    output logic RGB_R, 
+    output logic RGB_G, 
+    output logic RGB_B
+);
+
+    logic [2:0] funct3;
+    logic dmem_wren;
+    logic [31:0] dmem_address;
+    logic [31:0] dmem_data_in; // From processor to memory
+    logic [31:0] dmem_data_out; // From memory to processor
+    logic [31:0] imem_address;
+    logic [31:0] imem_data_out;
+
+    logic reset_from_mem; // Ignored or used if valid
+    logic led, red, green, blue;
+    
+    // System Reset Generation
+    logic sys_reset;
+    logic [3:0] reset_cnt = 4'd0;
+    
+    initial sys_reset = 1'b1;
+    
+    always_ff @(posedge clk) begin
+        if (reset_cnt < 4'd10) begin
+            sys_reset <= 1'b1;
+            reset_cnt <= reset_cnt + 1;
+        end else begin
+            sys_reset <= 1'b0;
+        end
+    end
+
+    // Processor Instantiation
+    processor u_processor (
+        .clk            (clk),
+        .reset          (sys_reset),
+        .imem_address   (imem_address),
+        .imem_data_in   (imem_data_out),
+        .dmem_address   (dmem_address),
+        .dmem_data_in   (dmem_data_in),
+        .dmem_data_out  (dmem_data_out),
+        .dmem_wren      (dmem_wren),
+        .funct3_out     (funct3)
+    );
+
+    // Memory Instantiation
+    memory #(
+        .IMEM_INIT_FILE_PREFIX  ("blink") // Change to "rv32i_test" for the report simulation
+    ) u_mem (
+        .clk            (clk), 
+        .funct3         (funct3), 
+        .dmem_wren      (dmem_wren), 
+        .dmem_address   (dmem_address), 
+        .dmem_data_in   (dmem_data_in), 
+        .imem_address   (imem_address), 
+        .imem_data_out  (imem_data_out), 
+        .dmem_data_out  (dmem_data_out), 
+        .reset          (reset_from_mem), 
+        .led            (led), 
+        .red            (red), 
+        .green          (green), 
+        .blue           (blue)
+    );
+
+    assign LED = ~led;
+    assign RGB_R = ~red;
+    assign RGB_G = ~green;
+    assign RGB_B = ~blue;
+
+endmodule
